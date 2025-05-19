@@ -4,4 +4,5 @@ In this repository you will find an .Rmd that creates a simulated dataset and th
 Methods: 
 1. Parametric
 2. Extreme Value Theory
-3. Bayesian Hierarchical 
+3. Bayesian Hierarchical
+4. Illustrated mixture model proposal (untested)
