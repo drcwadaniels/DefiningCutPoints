@@ -1,0 +1,669 @@
+---
+title: "Cutpoint Analysis"
+author: "Carter Daniels"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+rm(list=ls())
+library(MASS)
+library(lme4)
+library(lmerTest)
+library(tidyverse)
+library(ggplot2)
+library(rstan)
+library(cmdstanr)
+library(gamlss.dist)
+library(bayestestR)
+library(ggridges)
+
+```
+
+```{r}
+
+fitPareto <- function(dat, ct, Q)
+{
+  mu <- quantile(dat,ct)
+  quant <- (Q-ct)/(1-ct)
+  qexp(quant, 1/(mean(dat[dat>mu])-mu))+mu
+}
+
+
+```
+
+
+```{r}
+data.path <- "E://Dropbox//2 All of Carter's Stuff//Carter Local//IndustryPresentations//"
+set.seed(1234)
+
+#parameters of simulation
+exp_rate <- 0.5
+plate_effect <- 0.5
+Run_effect <- 0.5
+Plate_Run_effect <- 0.5
+Analyst_effect <- 0.5
+
+```
+
+```{r}
+
+#Negative Controls 
+rep_temp <- rexp(3,exp_rate) + 65 +(mvrnorm(n=2, rep(0.7,3), Sigma = matrix(c(1,0.85,0.95, 
+                                                              0.85, 1, 0.90, 
+                                                              0.95, 0.90, 1),3,3))/10)*100
+rep_temp <- as.data.frame(rep_temp)
+rep_temp <- cbind(rep_temp, rep(row.names(rep_temp),8))
+rep_temp <- rep_temp[,c(1:3)]
+#build out predictor columns
+rep_temp$Plate <- rep(rep(c(0,1),ea=2),4)
+rep_temp$Run <- rep(rep(c(0,1),ea=4),2)
+rep_temp$Analyst <- rep(c(0,1),ea=8)
+#adjust data by predictors
+rep_temp$Plate_effect <- rep_temp$Plate*plate_effect
+rep_temp$Run_effect <- rep_temp$Run*Run_effect
+rep_temp$Analyst_effect <- rep_temp$Analyst*Analyst_effect
+rep_temp[,c(1:3)] <- rep_temp[,c(1:3)] + rep_temp$Plate_effect + rep_temp$Run_effect + rep_temp$Analyst_effect 
+all_negative_controls <- rep_temp
+
+
+colnames(all_negative_controls)[c(1:3)]<-c("Rep1","Rep2","Rep3")
+long_negative_controls <- all_negative_controls %>% pivot_longer(cols=Rep1:Rep3)
+colnames(long_negative_controls)[grepl("name|value",colnames(long_negative_controls))]<-c("RepID","NCSignal")
+long_negative_controls$Sample <- "NC"
+
+#seed at least one outliers:
+long_negative_controls$NCSignal[38]<-long_negative_controls$NCSignal[38]+50
+
+ 
+#biological data
+# means for each animal
+animal_mus <- rnorm(30,mean=0.7,0.15) 
+
+#generate data
+temp <- matrix(data=NA,nrow=30,ncol=3)
+for (i in 1:30)
+{
+  temp[i,] <- rexp(3,exp_rate) + 65+(mvrnorm(n=1, rep(animal_mus[i],3), Sigma = matrix(c(0.9,0.7,0.8, 
+                                                               0.7, 0.9, 0.8, 
+                                                               0.8, 0.75, 0.9),3,3))/10)*100
+}
+temp <- as.data.frame(temp)
+#check CV
+temp$rowMean <- rowMeans(temp)
+temp$sd <- apply(temp[,c(1:3)],1,sd)
+temp$CV <- temp$sd/temp$rowMean
+mean(temp$CV)
+
+#copy data 8 times
+rep_temp <- temp[,c(1:3)]
+rep_temp <- cbind(rep_temp, rep(row.names(rep_temp),8))
+rep_temp <- rep_temp[,c(1:3)]
+#build out predictor columns
+rep_temp$Plate <- rep(rep(c(0,1),ea=30),4)
+rep_temp$Run <- rep(rep(c(0,1),ea=60),2)
+rep_temp$Analyst <- rep(c(0,1),ea=120)
+rep_temp$Run_Plate <- ifelse((rep_temp$Run==1) & (rep_temp$Plate)==1,1,0)
+#adjust data by predictors
+rep_temp$Plate_effect <- rep_temp$Plate*plate_effect
+rep_temp$Run_effect <- rep_temp$Run*Run_effect
+rep_temp$Analyst_effect <- rep_temp$Analyst*Analyst_effect
+rep_temp$Run_Plate_effect <- rep_temp$Run_Plate*Plate_Run_effect
+rep_temp[,c(1:3)] <- rep_temp[,c(1:3)] + rep_temp$Plate_effect + rep_temp$Run_effect + 
+    rep_temp$Run_Plate_effect  + rep_temp$Analyst_effect + rnorm(nrow(rep_temp),0,1)
+
+
+ null_biological_data <- rep_temp
+colnames(null_biological_data)[c(1:3)]<-c("Rep1","Rep2","Rep3")
+ null_biological_data$CYNOID <- rep(paste0("CYNO_",c(1:30)),8)
+long_biologica_null <- null_biological_data %>% pivot_longer(cols=Rep1:Rep3)
+colnames(long_biologica_null)[grepl("name|value",colnames(long_biologica_null))]<-c("RepID","NullSignal")
+long_biologica_null$Sample <- "BiologicalNull"
+ 
+
+
+```
+
+
+```{r, fig.width = 4, fig.height = 4}
+
+#fit model
+
+nc_model <- lmer(NCSignal~Run*Plate+(1|Analyst), 
+                 data=long_negative_controls)
+summary(nc_model)
+#residuals and tukey boxplot evaluation
+long_negative_controls$residuals <- residuals(nc_model)
+long_negative_controls$quantile1 <- quantile(long_negative_controls$residuals,0.25)
+long_negative_controls$quantile3 <- quantile(long_negative_controls$residuals,0.75)
+long_negative_controls$lower_outlierTheta <- long_negative_controls$quantile1 - 1.5*(long_negative_controls$quantile3-long_negative_controls$quantile1)
+long_negative_controls$upper_outlierTheta <- long_negative_controls$quantile3 + 1.5*(long_negative_controls$quantile3-long_negative_controls$quantile1)
+long_negative_controls$outlier <- ifelse(long_negative_controls$residuals<long_negative_controls$lower_outlierTheta, 1, 
+                                         ifelse(long_negative_controls$residuals>long_negative_controls$upper_outlierTheta,1,0))
+sum(long_negative_controls$outlier)
+
+#plot tukey boxplot
+ggplot() + 
+  geom_boxplot(data = long_negative_controls, 
+               aes(x = Sample, y=residuals)) + 
+  geom_jitter(data=long_negative_controls, 
+             aes(x = Sample, y=residuals)) +
+  geom_hline(data=long_negative_controls, 
+             aes(yintercept=upper_outlierTheta), color = "red") + 
+  geom_hline(data=long_negative_controls, 
+             aes(yintercept=lower_outlierTheta), color = "red") + 
+  geom_text(data = long_negative_controls[long_negative_controls$outlier==1,], 
+            aes(x=Sample, y = residuals, label=interaction(Analyst,Run,Plate)))
+```
+
+
+```{r}
+
+#remove outlier and calculate ncpool mean per plate
+perPlate_NCmean <- long_negative_controls  %>% 
+  group_by(Analyst, Run, Plate) %>% summarize(across(.cols=NCSignal,.fns=mean))
+
+#merge data
+null_biological_data <- merge(long_biologica_null,
+                              perPlate_NCmean[,c("Analyst","Run","Plate","NCSignal")],
+                              by=c("Analyst","Run","Plate"))
+#calculate SNratio
+null_biological_data$SNratio <- null_biological_data$NullSignal/null_biological_data$NCSignal
+
+```
+
+```{r}
+
+null_model <- lmer(log(SNratio)~Plate*Run+(1|Analyst)+(1|CYNOID), 
+                    data= null_biological_data)
+summary(null_model)
+null_biological_data$residuals <- residuals(null_model)
+null_biological_data$quantile1 <- quantile(null_biological_data$residuals,0.25)
+null_biological_data$quantile3 <- quantile(null_biological_data$residuals,0.75)
+null_biological_data$lower_outlierTheta <- null_biological_data$quantile1 - 1.5*(null_biological_data$quantile3-null_biological_data$quantile1)
+null_biological_data$upper_outlierTheta <- null_biological_data$quantile3 + 1.5*(null_biological_data$quantile3-null_biological_data$quantile1)
+null_biological_data$outlier <- ifelse(null_biological_data$residuals<null_biological_data$lower_outlierTheta, 1, 
+                                         ifelse(null_biological_data$residuals>null_biological_data$upper_outlierTheta,1,0))
+sum(null_biological_data$outlier)
+
+
+ggplot() + 
+  geom_boxplot(data = null_biological_data, 
+               aes(x = CYNOID, y=residuals)) + 
+  geom_jitter(data=null_biological_data, 
+             aes(x = CYNOID, y=residuals)) +
+  geom_hline(data=null_biological_data, 
+             aes(yintercept=upper_outlierTheta), color = "red") + 
+  geom_hline(data=null_biological_data, 
+             aes(yintercept=lower_outlierTheta), color = "red") + 
+  geom_text(data = null_biological_data[null_biological_data$outlier==1,], 
+            aes(x=CYNOID, y = residuals, label=interaction(CYNOID,Analyst,Run,Plate))) + 
+   theme(axis.text.x = element_blank())
+
+```
+
+```{r, fig.width = 4, fig.height = 4}
+
+#remove outliers
+null_biological_data_noOutliers <- null_biological_data 
+null_model2 <- lmer(log10(SNratio)~Plate*Run+(1|Analyst)+(1|CYNOID), 
+                    data= null_biological_data_noOutliers)
+CYNOest <- ranef(null_model2)$CYNOID
+CYNOest$CYNOID <- rownames(CYNOest)
+CYNOest$Sample <- "CYNO_BLUP"
+CYNOest$quantile1 <- quantile(CYNOest$`(Intercept)`,0.25)
+CYNOest$quantile3 <- quantile(CYNOest$`(Intercept)`,0.75)
+CYNOest$lower_outlierTheta <- CYNOest$quantile1 - 1.5*(CYNOest$quantile3-CYNOest$quantile1)
+CYNOest$upper_outlierTheta <- CYNOest$quantile3 + 1.5*(CYNOest$quantile3-CYNOest$quantile1)
+CYNOest$outlier <- ifelse(CYNOest$`(Intercept)`<CYNOest$lower_outlierTheta, 1, 
+                                         ifelse(CYNOest$`(Intercept)`>CYNOest$upper_outlierTheta,1,0))
+sum(CYNOest$outlier)
+
+
+
+ggplot() + 
+   geom_boxplot(data=CYNOest, aes(x=Sample,y=`(Intercept)`)) + 
+   geom_jitter(data=CYNOest, aes(x=Sample,y=`(Intercept)`)) + 
+  geom_hline(data=CYNOest, 
+             aes(yintercept=upper_outlierTheta), color = "red") + 
+  geom_hline(data=CYNOest, 
+             aes(yintercept=lower_outlierTheta), color = "red") + 
+  ylab("Subject-Specific Intercept Offset")
+
+
+```
+
+```{r}
+
+null_biological_data_noOutliers_meanSummary <- null_biological_data_noOutliers %>% 
+  group_by(CYNOID) %>% 
+  summarize(across(.cols=SNratio ,.fns=c(mean,sd)))
+colnames(null_biological_data_noOutliers_meanSummary)[c(2:3)]<-c("Mean","SD")
+
+```
+
+
+```{r}
+
+exGaus <- "
+
+data {
+
+int<lower=0> nsubjects;
+int<lower=0> nobs;
+int<lower=0> Subject[nobs];
+vector[nobs] y;
+real k;
+
+}
+
+parameters {
+
+real mu; 
+real<lower=0> sigma;
+real<lower=0> nu;
+real<lower=0> sigma_e;
+vector[nsubjects] G_raw;
+vector<lower=0,upper=1>[nsubjects] E_raw;
+
+}
+
+transformed parameters {
+
+real lsigma;
+real lnu; 
+vector[nsubjects] G;
+vector[nsubjects] E;
+lsigma = log(sigma);
+lnu = log(nu);
+G = mu + G_raw*sigma;
+E = -nu*log(1-E_raw);
+
+}
+
+model {
+
+mu ~normal(0,k);
+sigma ~ lognormal(-1.5,k);
+nu ~ lognormal(-1,k);
+sigma_e ~ lognormal(-1.5,k);
+
+for (i in 1:nsubjects)
+{
+  G_raw[i] ~ std_normal();
+}
+
+for (i in 1:nobs)
+{
+y[i] ~ normal(G[Subject[i]] + E[Subject[i]], sigma_e); 
+}
+
+}
+
+
+
+
+"
+write_stan_file(exGaus,
+                dir=data.path,
+                basename="exGaus.stan",
+                force_overwrite = TRUE)
+
+compiled_ExGauss <- stan_model(paste0(data.path,"exGaus.stan"))
+
+```
+
+```{r}
+
+null_biological_data_noOutliers$CYNO_num <- as.numeric(str_split_fixed(null_biological_data_noOutliers$CYNOID, "_", 2)[,2])
+null_biological_data_noOutliers_byPlate <- null_biological_data_noOutliers %>% group_by(CYNO_num,Plate) %>% 
+  summarize(across(.cols=SNratio,.fns=mean))
+
+
+data_to_stan <- list(nobs = nrow(null_biological_data_noOutliers), 
+                     nsubjects = length(unique(null_biological_data_noOutliers$CYNO_num)), 
+                     y = log(null_biological_data_noOutliers$SNratio), 
+                     Subject = null_biological_data_noOutliers$CYNO_num, 
+                     k = 1)
+
+
+exGaus_sample <- sampling(object = compiled_ExGauss, 
+                          chains = 4, 
+                          iter = 10000, 
+                          data = data_to_stan, 
+                          control = list(adapt_delta = 0.995, max_treedepth = 20))
+
+```
+
+```{r}
+
+#generate cutpoints
+#extract model parameters
+params <- extract(exGaus_sample, pars = c("mu","sigma","sigma_e","nu"))
+full_posterior <- gamlss.dist::rexGAUS(n=10000,params$mu,sqrt(params$sigma+params$sigma_e),params$nu)
+cp_calc <- exp(qexGAUS(0.90,params$mu,sqrt(params$sigma+params$sigma_e),params$nu))
+meanCP <- exp(mean(log(null_biological_data_noOutliers_meanSummary$Mean))+1.645*sd(log(null_biological_data_noOutliers_meanSummary$Mean)))
+medianCP <- exp(mean(log(null_biological_data_noOutliers_meanSummary$Mean))+1.645*mad(log(null_biological_data_noOutliers_meanSummary$Mean)))
+evtCP <- exp(fitPareto(log(null_biological_data_noOutliers_meanSummary$Mean),0.9,0.95))
+
+
+null_biological_data_noOutliers_meanSummary$meanCP <- meanCP
+null_biological_data_noOutliers_meanSummary$medianCP <- medianCP
+null_biological_data_noOutliers_meanSummary$evtCP <- evtCP
+null_biological_data_noOutliers_meanSummary$exGauscp <- mean(cp_calc)
+null_biological_data_noOutliers_meanSummary$exGauscp_hdi_lower <- as.data.frame( bayestestR::hdi(cp_calc))$CI_low
+null_biological_data_noOutliers_meanSummary$exGauscp_hdi_upper <- as.data.frame( bayestestR::hdi(cp_calc))$CI_high
+null_biological_data_noOutliers_meanSummary$Sample <- "CYNO"
+
+```
+
+
+```{r, fig.width = 4, fig.height = 4}
+
+ggplot() + 
+  geom_boxplot(aes(x=Sample,  y=Mean), data = null_biological_data_noOutliers_meanSummary) + 
+  geom_jitter(aes(x=Sample,  y=Mean), data = null_biological_data_noOutliers_meanSummary) + 
+  geom_hline(aes(yintercept=meanCP), data = null_biological_data_noOutliers_meanSummary ,color = "black") + 
+  geom_hline(aes(yintercept=medianCP), data = null_biological_data_noOutliers_meanSummary, color = "orange") + 
+  geom_hline(aes(yintercept=evtCP), data = null_biological_data_noOutliers_meanSummary,color = "blue") + 
+  geom_hline(aes(yintercept=exGauscp ), data = null_biological_data_noOutliers_meanSummary ,color = "red") + 
+  geom_hline(aes(yintercept=exGauscp_hdi_lower), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") +
+  geom_hline(aes(yintercept=exGauscp_hdi_upper), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") + 
+  ylab("Signal/Noise Ratio")
+
+
+
+```
+
+```{r, fig.width = 4, fig.height = 4}
+
+ggplot() + 
+  geom_boxplot(aes(x=Sample,  y=SNratio), data = null_biological_data_noOutliers) + 
+  geom_jitter(aes(x=Sample,  y=SNratio, color = CYNOID), data = null_biological_data_noOutliers) + 
+  guides(color="none")+
+  geom_hline(aes(yintercept=meanCP), data = null_biological_data_noOutliers_meanSummary ,color = "black") + 
+  geom_hline(aes(yintercept=medianCP), data = null_biological_data_noOutliers_meanSummary, color = "orange") + 
+  geom_hline(aes(yintercept=evtCP), data = null_biological_data_noOutliers_meanSummary,color = "blue") + 
+  geom_hline(aes(yintercept=exGauscp ), data = null_biological_data_noOutliers_meanSummary ,color = "red") + 
+  geom_hline(aes(yintercept=exGauscp_hdi_lower), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") +
+  geom_hline(aes(yintercept=exGauscp_hdi_upper), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") + 
+    ylab("Signal/Noise Ratio")
+
+
+
+```
+
+
+```{r, fig.width = 4, fig.height = 4}
+
+null_biological_data_noOutliers$meanCP <- exp(mean(log(null_biological_data_noOutliers$SNratio))+1.645*sd(log(null_biological_data_noOutliers$SNratio)))
+null_biological_data_noOutliers$medianCP <- exp(median(log(null_biological_data_noOutliers$SNratio))+1.645*mad(log(null_biological_data_noOutliers$SNratio)))
+null_biological_data_noOutliers$evtCP <- exp(fitPareto(log(null_biological_data_noOutliers$SNratio),0.9,0.95))
+
+
+ggplot() + 
+  geom_boxplot(aes(x=Sample,  y=SNratio), data = null_biological_data_noOutliers) + 
+  geom_jitter(aes(x=Sample,  y=SNratio, color = CYNOID), data = null_biological_data_noOutliers) + 
+  guides(color="none")+
+  geom_hline(aes(yintercept=meanCP), data = null_biological_data_noOutliers ,color = "black") + 
+  geom_hline(aes(yintercept=medianCP), data = null_biological_data_noOutliers, color = "orange") + 
+  geom_hline(aes(yintercept=evtCP), data = null_biological_data_noOutliers,color = "blue") + 
+  geom_hline(aes(yintercept=exGauscp ), data = null_biological_data_noOutliers_meanSummary ,color = "red") + 
+  geom_hline(aes(yintercept=exGauscp_hdi_lower), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") +
+  geom_hline(aes(yintercept=exGauscp_hdi_upper), data = null_biological_data_noOutliers_meanSummary ,color = "red", linetype = "dashed") + 
+    ylab("Signal/Noise Ratio")
+
+
+```
+
+
+```{r}
+
+full_posterior<-as.data.frame(full_posterior)
+full_posterior$Sample <- "Posterior"
+null_biological_data_noOutliers_meanSummary$Sample2 <- "Posterior"
+null_biological_data_noOutliers$Sample2 <- "Posterior"
+
+ggplot() + 
+  geom_density_ridges(data=full_posterior, 
+                                aes(y=Sample,x=exp(full_posterior))) + 
+  geom_point(data=null_biological_data_noOutliers, 
+             aes(x=SNratio,y=Sample2,color=CYNOID),size = 4, alpha = 0.1) +
+  geom_point(data=null_biological_data_noOutliers_meanSummary, 
+             aes(x=Mean,y=Sample2), size = 4, color = "black") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper), color = "red", linetype = "dashed") +
+  guides(color="none") + 
+  scale_y_discrete(expand = c(0, 0)) + 
+  theme(axis.text.y = element_blank()) + 
+  xlim(0,3) + 
+  ylab("Density") + 
+  xlab("Signal/Noise Ratio")
+
+
+ggplot() +
+  stat_ecdf(data=full_posterior, 
+            aes(exp(full_posterior)), 
+            geom="step") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper), color = "red", linetype = "dashed") + 
+  geom_point(data=null_biological_data_noOutliers, 
+             aes(x=SNratio,y=0,color=CYNOID),size = 4, alpha = 0.1) +
+  geom_point(data=null_biological_data_noOutliers_meanSummary, 
+             aes(x=Mean,y=0), size = 4, color = "black") + 
+  guides(color="none") + 
+  xlim(0,3) + 
+  xlab("Signal/Noise Ratio") + 
+  ylab("Probability SNratio >= x)")
+
+
+```
+
+```{r}
+
+exGaus_ecdf <- ecdf(exp(full_posterior$full_posterior))
+cumP_CP <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp))
+cumP_lHDI <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp_hdi_lower))/cumP_CP
+null_biological_data_noOutliers$cumP <- exGaus_ecdf(null_biological_data_noOutliers$SNratio)/cumP_CP
+null_biological_data_noOutliers$cumP <- ifelse(null_biological_data_noOutliers$cumP>1,1,null_biological_data_noOutliers$cumP)
+
+mean_probability <- null_biological_data_noOutliers %>% group_by(CYNOID) %>% 
+  summarize(across(.cols=cumP,.fns=mean))
+mean_probability$CYNOID <- factor(mean_probability$CYNOID, levels = mean_probability$CYNOID[order(mean_probability$cumP, decreasing="TRUE")])
+
+ggplot() + 
+  geom_point(data=mean_probability, 
+             aes(x=CYNOID, cumP)) + 
+  geom_hline(data=mean_probability, 
+             aes(yintercept=1), color = "red") + 
+  geom_hline(data=mean_probability, 
+             aes(yintercept=cumP_lHDI), color = "red", linetype = "dashed") + 
+  ylab("Probability ADA >= CP") + 
+  theme(axis.text.x = element_blank()) + 
+  xlab("Subject ID")
+
+```
+
+
+# Illustrate Mixture Distribution Example
+
+```{r}
+
+og_posterior <- as.data.frame(full_posterior$full_posterior)
+colnames(og_posterior)<-"full_posterior"
+og_posterior$id <- "N"
+shifted_posterior <- as.data.frame(gamlss.dist::rexGAUS(n=10000,params$mu+1.5,sqrt(params$sigma+params$sigma_e),params$nu))
+colnames(shifted_posterior)<-colnames(og_posterior)[1]
+shifted_posterior$id <- "P"
+
+all_posterior <- rbind(og_posterior,shifted_posterior)
+all_posterior$Sample <-"CYNO"
+
+
+#construct ROC for range of CPs
+potential_CPS <- seq(0.1,3,by=0.025)
+for (cp_i in potential_CPS)
+{
+  all_posterior[,ncol(all_posterior)+1] <- ifelse(exp(all_posterior$full_posterior)>=cp_i,1,0)
+  colnames(all_posterior)[ncol(all_posterior)]<-paste0("CP_",cp_i)
+}
+
+ROCdataOnly <- all_posterior %>% dplyr::select(id,CP_0.1:CP_3) %>% pivot_longer(cols=CP_0.1:CP_3)
+colnames(ROCdataOnly)<-c("id","Cutpoint","Binary")
+ROCdataOnly$Cutpoint <- as.numeric(str_split_fixed(ROCdataOnly$Cutpoint,"_",2)[,2])
+
+#brute force ROC summary
+ROCsummary <- NULL
+ROCsummary$Cutpoint <- NULL
+ROCsummary$TruePositive <- NULL
+ROCsummary$TrueNegative <- NULL
+ROCsummary$FalsePositive <- NULL
+ROCsummary$FalseNegative <- NULL
+
+i = 0
+for (cp_i in unique(ROCdataOnly$Cutpoint))
+{
+  i = i + 1
+  temp <- ROCdataOnly[which(ROCdataOnly$Cutpoint==cp_i[1]),]
+  temp$TruePositive <- sum(temp$Binary[temp$id=="P"])/length(temp$id[temp$id=="P"])
+  temp$TrueNegative <- sum(temp$Binary[which(temp$Binary==0 & temp$id=="N")]==0)/length(temp$id[temp$id=="N"])
+  temp$FalsePositive <- sum(temp$Binary[temp$id=="N"])/length(temp$id[temp$id=="N"])
+  temp$FalseNegative <- sum(temp$Binary[which(temp$Binary==0 & temp$id=="P")]==0)/length(temp$id[temp$id=="P"])
+  
+  ROCsummary$Cutpoint[i] <- cp_i
+  ROCsummary$TruePositive[i] <- unique(temp$TruePositive)
+  ROCsummary$TrueNegative[i] <- unique(temp$TrueNegative)
+  ROCsummary$FalsePositive[i] <- unique(temp$FalsePositive)
+  ROCsummary$FalseNegative[i] <- unique(temp$FalseNegative)
+
+}
+ROCsummary <- as.data.frame(ROCsummary)
+ROCsummary
+```
+
+
+```{r}
+
+ggplot() + 
+  geom_density_ridges(data=all_posterior, 
+                                aes(y=Sample,x=exp(full_posterior), fill = id),alpha=0.5) + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper), color = "red", linetype = "dashed") +
+  guides(color="none") + 
+  scale_y_discrete(expand = c(0, 0)) + 
+  theme(axis.text.y = element_blank()) + 
+  xlim(0,12)+
+  ylab("Density") + 
+  xlab("Signal/Noise Ratio")
+
+ggplot() + 
+  geom_point(data=ROCsummary, 
+            aes(x=FalsePositive,y=TruePositive, color=Cutpoint)) + 
+  geom_line(data=ROCsummary, 
+            aes(x=FalsePositive,y=TruePositive)) + 
+  xlim(0,0.5)
+
+ggplot() + 
+  geom_density_ridges(data=all_posterior, 
+                                aes(y=Sample,x=exp(full_posterior), fill = id),alpha=0.5) + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp+.31), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower+.31), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper+.31), color = "red", linetype = "dashed") +
+  guides(color="none") + 
+  scale_y_discrete(expand = c(0, 0)) + 
+  theme(axis.text.y = element_blank()) + 
+  xlim(0,12)+
+  ylab("Density") + 
+  xlab("Signal/Noise Ratio")
+
+
+
+
+
+ggplot() + 
+  geom_density_ridges(data=all_posterior, 
+                                aes(y=Sample,x=exp(full_posterior), fill = id),alpha=0.5) + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp+.31), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower+.31), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper+.31), color = "red", linetype = "dashed") +
+  guides(color="none") + 
+  scale_y_discrete(expand = c(0, 0)) + 
+  theme(axis.text.y = element_blank()) + 
+  xlim(0,12)+
+  ylab("Density") + 
+  xlab("Signal/Noise Ratio")
+  
+
+# with simulated outliers
+simOutliers<- null_biological_data_noOutliers
+simOutliers[simOutliers$CYNOID=="CYNO_1",c("SNratio")] <- simOutliers[simOutliers$CYNOID=="CYNO_1",c("SNratio")] + 1.25
+simOutliers[simOutliers$CYNOID=="CYNO_3",c("SNratio")] <- simOutliers[simOutliers$CYNOID=="CYNO_3",c("SNratio")] + 2
+
+simOutliers_meanSummary <- simOutliers %>% 
+  filter(outlier==0) %>% group_by(CYNOID) %>% 
+  summarize(across(.cols=SNratio ,.fns=c(mean,sd)))
+colnames(simOutliers_meanSummary)[c(2:3)]<-c("Mean","SD")
+simOutliers_meanSummary$Outlier <- ifelse(simOutliers_meanSummary$CYNOID=="CYNO_1",1,
+                                          ifelse(simOutliers_meanSummary$CYNOID=="CYNO_3",1,0))
+
+  ggplot() + 
+  geom_density_ridges(data=all_posterior, 
+                                aes(y=Sample,x=exp(full_posterior), fill = id),alpha=0.5) + 
+  geom_point(data=simOutliers_meanSummary, 
+             aes(x=Mean,y=1,color = as.factor(Outlier)), size = 4) + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp+.31), color = "red") + 
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_lower+.31), color = "red", linetype = "dashed") +
+  geom_vline(data = null_biological_data_noOutliers_meanSummary, 
+             aes(xintercept = exGauscp_hdi_upper+.31), color = "red", linetype = "dashed") +
+  scale_y_discrete(expand = c(0, 0)) + 
+  theme(axis.text.y = element_blank()) + 
+  xlim(0,12)+
+  ylab("Density") + 
+  xlab("Signal/Noise Ratio")
+
+```
+
+```{r}
+
+cumP_CP <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp+0.275))
+cumP_lHDI <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp_hdi_lower+0.275))/cumP_CP
+simOutliers$cumP <- exGaus_ecdf(simOutliers$SNratio)/cumP_CP
+simOutliers$cumP <- ifelse(simOutliers$cumP>1,1,simOutliers$cumP)
+
+sim_mean_probability <- simOutliers %>% group_by(CYNOID) %>% 
+  summarize(across(.cols=cumP,.fns=mean))
+sim_mean_probability$CYNOID <- factor(sim_mean_probability$CYNOID, levels = sim_mean_probability$CYNOID[order(sim_mean_probability$cumP, decreasing="TRUE")])
+
+ggplot() + 
+  geom_point(data=sim_mean_probability, 
+             aes(x=CYNOID, cumP)) + 
+  geom_hline(data=sim_mean_probability, 
+             aes(yintercept=1), color = "red") + 
+  geom_hline(data=sim_mean_probability, 
+             aes(yintercept=cumP_lHDI), color = "red", linetype = "dashed") + 
+  ylab("Probability ADA >= CP") + 
+  theme(axis.text.x = element_blank()) + 
+  xlab("Subject ID")
+
+```

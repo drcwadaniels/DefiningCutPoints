@@ -614,18 +614,21 @@ ggplot() +
   
 
 # with simulated outliers
-simOutliers_summary <- null_biological_data_noOutliers_meanSummary
-simOutliers_summary[simOutliers_summary$CYNOID=="CYNO_1",c("Mean")] <- simOutliers_summary[simOutliers_summary$CYNOID=="CYNO_1",c("Mean")] + 1.25
-simOutliers_summary[simOutliers_summary$CYNOID=="CYNO_3",c("Mean")] <- simOutliers_summary[simOutliers_summary$CYNOID=="CYNO_3",c("Mean")] + 2
-simOutliers_summary$Outlier <- 0
-simOutliers_summary$Outlier[which(simOutliers_summary$CYNOID=="CYNO_1" | simOutliers_summary$CYNOID=="CYNO_3")]<-1
+simOutliers<- null_biological_data_noOutliers
+simOutliers[simOutliers$CYNOID=="CYNO_1",c("SNratio")] <- simOutliers[simOutliers$CYNOID=="CYNO_1",c("SNratio")] + 1.25
+simOutliers[simOutliers$CYNOID=="CYNO_3",c("SNratio")] <- simOutliers[simOutliers$CYNOID=="CYNO_3",c("SNratio")] + 2
 
-
+simOutliers_meanSummary <- simOutliers %>% 
+  filter(outlier==0) %>% group_by(CYNOID) %>% 
+  summarize(across(.cols=SNratio ,.fns=c(mean,sd)))
+colnames(simOutliers_meanSummary)[c(2:3)]<-c("Mean","SD")
+simOutliers_meanSummary$Outlier <- ifelse(simOutliers_meanSummary$CYNOID=="CYNO_1",1,
+                                          ifelse(simOutliers_meanSummary$CYNOID=="CYNO_3",1,0))
 
   ggplot() + 
   geom_density_ridges(data=all_posterior, 
                                 aes(y=Sample,x=exp(full_posterior), fill = id),alpha=0.5) + 
-  geom_point(data=simOutliers_summary, 
+  geom_point(data=simOutliers_meanSummary, 
              aes(x=Mean,y=1,color = as.factor(Outlier)), size = 4) + 
   geom_vline(data = null_biological_data_noOutliers_meanSummary, 
              aes(xintercept = exGauscp+.275), color = "red") + 
@@ -638,5 +641,29 @@ simOutliers_summary$Outlier[which(simOutliers_summary$CYNOID=="CYNO_1" | simOutl
   xlim(0,12)+
   ylab("Density") + 
   xlab("Signal/Noise Ratio")
+
+```
+
+```{r}
+
+cumP_CP <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp+0.275))
+cumP_lHDI <- unique(exGaus_ecdf(null_biological_data_noOutliers_meanSummary$exGauscp_hdi_lower+0.275))/cumP_CP
+simOutliers$cumP <- exGaus_ecdf(simOutliers$SNratio)/cumP_CP
+simOutliers$cumP <- ifelse(simOutliers$cumP>1,1,simOutliers$cumP)
+
+sim_mean_probability <- simOutliers %>% group_by(CYNOID) %>% 
+  summarize(across(.cols=cumP,.fns=mean))
+sim_mean_probability$CYNOID <- factor(sim_mean_probability$CYNOID, levels = sim_mean_probability$CYNOID[order(sim_mean_probability$cumP, decreasing="TRUE")])
+
+ggplot() + 
+  geom_point(data=sim_mean_probability, 
+             aes(x=CYNOID, cumP)) + 
+  geom_hline(data=sim_mean_probability, 
+             aes(yintercept=1), color = "red") + 
+  geom_hline(data=sim_mean_probability, 
+             aes(yintercept=cumP_lHDI), color = "red", linetype = "dashed") + 
+  ylab("Probability ADA >= CP") + 
+  theme(axis.text.x = element_blank()) + 
+  xlab("Subject ID")
 
 ```
