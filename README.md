@@ -6,3 +6,5 @@ Methods:
 2. Extreme Value Theory
 3. Bayesian Hierarchical
 4. Illustrated mixture model proposal (untested)
+
+Note to evaluate the Bayesian model use the launch_shinystan(model) function the shinystan package
