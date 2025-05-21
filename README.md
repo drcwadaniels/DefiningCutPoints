@@ -1,6 +1,6 @@
 # DefiningCutPoints
 
-In this repository you will find an .Rmds that creates a simulated dataset and then explores different way of defining cutpoints, either with Tukey Box Plots identified ourliers culled or retained. 
+In this repository you will find .Rmds that creates a simulated dataset and then explores different ways of defining cutpoints, either with Tukey Box Plots identified ourliers culled or retained. 
 Methods: 
 1. Parametric
 2. Extreme Value Theory
